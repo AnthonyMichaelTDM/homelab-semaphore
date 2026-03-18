@@ -1,0 +1,45 @@
+---
+- name: Check route target reachability from reverse proxies
+  hosts: reverse_proxies
+  gather_facts: false
+  tasks:
+    - name: Build list of proxied target hosts
+      ansible.builtin.set_fact:
+        proxied_target_hosts: >-
+          {{
+            routes | default([])
+            | map(attribute='target')
+            | map('regex_replace', ':\\d+$', '')
+            | unique
+            | list
+          }}
+      when:
+        - routes is defined
+
+    - name: Ping each proxied target host from this reverse proxy
+      ansible.builtin.command:
+        cmd: ping -c 1 -W 1 {{ hostvars[item].ansible_host | default(item) }}
+      loop: "{{ proxied_target_hosts | default([]) }}"
+      register: proxy_ping_results
+      changed_when: false
+      failed_when: false
+      when:
+        - proxied_target_hosts is defined
+        - proxied_target_hosts | length > 0
+
+    - name: Fail if one or more proxied hosts are unreachable
+      ansible.builtin.assert:
+        that:
+          - (proxy_ping_results.results | rejectattr('rc', 'ne', 0) | list | length) == (proxy_ping_results.results | length)
+        fail_msg: >-
+          Unreachable proxied hosts from {{ inventory_hostname }}: {{
+            proxy_ping_results.results
+            | rejectattr('rc', 'equalto', 0)
+            | map(attribute='item')
+            | list
+            | join(', ')
+          }}
+        success_msg: >-
+          All proxied hosts reachable from {{ inventory_hostname }}: {{ proxied_target_hosts | join(', ') }}
+      when:
+        - proxy_ping_results is defined
