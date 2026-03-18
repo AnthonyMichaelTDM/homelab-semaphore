@@ -7,12 +7,31 @@
     bootstrap_install_packages: true
     bootstrap_grant_sudo: false
     bootstrap_passwordless_sudo: false
+    bootstrap_configure_sshd: true
     bootstrap_lxc_hosts: "{{ groups['lxc'] | default([]) }}"
     bootstrap_vm_hosts: "{{ groups['vm'] | default([]) }}"
+    bootstrap_sshd_config_snippet: |
+      PermitRootLogin no
+      AllowUsers ansible
+      KbdInteractiveAuthentication no
+      PasswordAuthentication no
+      AuthenticationMethods publickey
     bootstrap_guest_setup_script: |
       set -euo pipefail
       user="$BOOTSTRAP_USER"
       key="$(printf %s "$BOOTSTRAP_KEY_B64" | base64 -d)"
+
+      if [ "$CONFIGURE_SSHD" = "true" ]; then
+        sshd_conf="/etc/ssh/sshd_config.d/99-bootstrap.conf"
+        mkdir -p /etc/ssh/sshd_config.d
+        touch "$sshd_conf"
+        old_content="$(cat "$sshd_conf")"
+        printf '%s\n' "$SSHD_CONFIG_SNIPPET_B64" | base64 -d > "$sshd_conf"
+        if [ "$(cat "$sshd_conf")" != "$old_content" ]; then
+          systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
+          echo "CONFIGURED_SSHD:"
+        fi
+      fi
 
       if id -u "$user" >/dev/null 2>&1; then
         echo "SKIP_EXISTING_USER: $user"
@@ -99,12 +118,16 @@
           INSTALL_PACKAGES={{ (bootstrap_install_packages | bool) | ternary('true', 'false') }} \
           GRANT_SUDO={{ (bootstrap_grant_sudo | bool) | ternary('true', 'false') }} \
           PASSWORDLESS_SUDO={{ (bootstrap_passwordless_sudo | bool) | ternary('true', 'false') }} \
+          CONFIGURE_SSHD={{ (bootstrap_configure_sshd | bool) | ternary('true', 'false') }} \
+          SSHD_CONFIG_SNIPPET_B64={{ bootstrap_sshd_config_snippet | b64encode | quote }} \
           bash -lc 'printf %s "$BOOTSTRAP_SCRIPT_B64" | base64 -d | bash'
       args:
         executable: /bin/bash
       loop: "{{ bootstrap_lxc_hosts_list }}"
       register: lxc_bootstrap_results
-      changed_when: "'CREATED_USER:' in (stdout | default(''))"
+      changed_when: >-
+        'CREATED_USER:' in (stdout | default('')) or
+        'CONFIGURED_SSHD:' in (stdout | default(''))
 
     - name: Check qemu guest agent on VMs
       ansible.builtin.command: qm guest cmd {{ item | regex_search('[0-9]+$') }} ping
@@ -131,13 +154,17 @@
           INSTALL_PACKAGES={{ (bootstrap_install_packages | bool) | ternary('true', 'false') }} \
           GRANT_SUDO={{ (bootstrap_grant_sudo | bool) | ternary('true', 'false') }} \
           PASSWORDLESS_SUDO={{ (bootstrap_passwordless_sudo | bool) | ternary('true', 'false') }} \
+          CONFIGURE_SSHD={{ (bootstrap_configure_sshd | bool) | ternary('true', 'false') }} \
+          SSHD_CONFIG_SNIPPET_B64={{ bootstrap_sshd_config_snippet | b64encode | quote }} \
           bash -lc 'printf %s "$BOOTSTRAP_SCRIPT_B64" | base64 -d | bash'
       args:
         executable: /bin/bash
       loop: "{{ vm_guest_agent_checks.results }}"
       when: item.rc == 0
       register: vm_bootstrap_results
-      changed_when: "'CREATED_USER:' in (stdout | default(''))"
+      changed_when: >-
+        'CREATED_USER:' in (stdout | default('')) or
+        'CONFIGURED_SSHD:' in (stdout | default(''))
 
     - name: Post-bootstrap reminder for VMs without guest agent
       ansible.builtin.debug:
