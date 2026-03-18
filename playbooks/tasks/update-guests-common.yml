@@ -19,7 +19,8 @@
 
 - name: Run update script on guests that have it defined
   ansible.builtin.shell: update
-  executable: /bin/bash
+  args:
+    executable: /bin/bash
   environment: 
     PHS_SILENT: "1" # Set environment variable to make the update script run silently, that is, without interactive prompts
   async: 7200
