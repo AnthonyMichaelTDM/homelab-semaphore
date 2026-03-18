@@ -1,0 +1,16 @@
+---
+- name: Clear package caches
+  hosts: 'guests'
+  gather_facts: true
+  any_errors_fatal: true
+  become: true
+  tasks:
+    - name: Clear apt package cache on Debian-based guests
+      ansible.builtin.apt:
+        clean: true
+        autoclean: true
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Clear pacman package cache on Arch-based guests
+      ansible.builtin.command: pacman -Scc --noconfirm
+      when: ansible_facts['os_family'] == 'Archlinux'
