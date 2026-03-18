@@ -1,0 +1,34 @@
+---
+- name: run an update script on all guests to update their package lists and upgrade packages
+  hosts: guests
+  gather_facts: true
+  become: true
+  tasks:
+    - name: Check if update script is defined
+      ansible.builtin.shell: command -v update
+      register: update_script_check
+      changed_when: false
+      failed_when: false
+
+    - name: Debug update script availability
+      ansible.builtin.debug:
+        msg: >-
+          Update script {{ 'found' if update_script_check.rc == 0 else 'NOT found' }} on {{ inventory_hostname }}
+          Output: {{ update_script_check.stdout if update_script_check.rc == 0 else 'N/A' }}
+          Exit code: {{ update_script_check.rc }}
+
+    - name: Run update script on guests that have it defined
+      ansible.builtin.shell: update
+      when: update_script_check.rc == 0
+
+    - name: Update package lists and upgrade packages on Debian-based guests
+      ansible.builtin.apt:
+        update_cache: yes
+        upgrade: dist
+      when: (ansible_facts['os_family'] == "Debian") and (update_script_check.rc != 0)
+
+    - name: Update package lists and upgrade packages on Arch-based guests
+      ansible.builtin.pacman:
+        update_cache: yes
+        upgrade: yes
+      when: (ansible_facts['os_family'] == "Archlinux") and (update_script_check.rc != 0)
