@@ -5,8 +5,7 @@
   vars:
     bootstrap_ansible_user: ansible
     bootstrap_install_packages: true
-    bootstrap_grant_sudo: false
-    bootstrap_passwordless_sudo: false
+    bootstrap_grant_passwordless_sudo: true
     bootstrap_configure_sshd: true
     bootstrap_lxc_hosts: "{{ groups['lxc'] | default([]) }}"
     bootstrap_vm_hosts: "{{ groups['vm'] | default([]) }}"
@@ -26,8 +25,11 @@
         mkdir -p /etc/ssh/sshd_config.d
         touch "$sshd_conf"
         old_content="$(cat "$sshd_conf")"
-        printf '%s\n' "$SSHD_CONFIG_SNIPPET_B64" | base64 -d > "$sshd_conf"
-        if [ "$(cat "$sshd_conf")" != "$old_content" ]; then
+        new_content="$(printf '%s\n' "$SSHD_CONFIG_SNIPPET_B64" | base64 -d)"
+        if [ "$old_content" != "$new_content" ]; then
+          echo "Updating SSHD config with bootstrap snippet"
+          printf '%s' "$new_content" > "$sshd_conf"
+
           systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
           echo "CONFIGURED_SSHD:"
         fi
@@ -68,12 +70,9 @@
       fi
 
       if [ "$GRANT_SUDO" = "true" ]; then
-        if [ "$PASSWORDLESS_SUDO" = "true" ]; then
-          echo "$user ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/90-$user"
-        else
-          echo "$user ALL=(ALL) ALL" > "/etc/sudoers.d/90-$user"
-        fi
+        echo "$user ALL=(root) NOPASSWD:ALL" > "/etc/sudoers.d/90-$user"
         chmod 440 "/etc/sudoers.d/90-$user"
+        visudo -cf "/etc/sudoers.d/90-$user"
       fi
 
       echo "CREATED_USER: $user"
@@ -116,8 +115,7 @@
           BOOTSTRAP_KEY_B64={{ bootstrap_ansible_public_key | b64encode | quote }} \
           BOOTSTRAP_SCRIPT_B64={{ bootstrap_guest_setup_script | b64encode | quote }} \
           INSTALL_PACKAGES={{ (bootstrap_install_packages | bool) | ternary('true', 'false') }} \
-          GRANT_SUDO={{ (bootstrap_grant_sudo | bool) | ternary('true', 'false') }} \
-          PASSWORDLESS_SUDO={{ (bootstrap_passwordless_sudo | bool) | ternary('true', 'false') }} \
+          GRANT_SUDO={{ (bootstrap_grant_passwordless_sudo | bool) | ternary('true', 'false') }} \
           CONFIGURE_SSHD={{ (bootstrap_configure_sshd | bool) | ternary('true', 'false') }} \
           SSHD_CONFIG_SNIPPET_B64={{ bootstrap_sshd_config_snippet | b64encode | quote }} \
           bash -lc 'printf %s "$BOOTSTRAP_SCRIPT_B64" | base64 -d | bash'
@@ -152,8 +150,7 @@
           BOOTSTRAP_KEY_B64={{ bootstrap_ansible_public_key | b64encode | quote }} \
           BOOTSTRAP_SCRIPT_B64={{ bootstrap_guest_setup_script | b64encode | quote }} \
           INSTALL_PACKAGES={{ (bootstrap_install_packages | bool) | ternary('true', 'false') }} \
-          GRANT_SUDO={{ (bootstrap_grant_sudo | bool) | ternary('true', 'false') }} \
-          PASSWORDLESS_SUDO={{ (bootstrap_passwordless_sudo | bool) | ternary('true', 'false') }} \
+          GRANT_SUDO={{ (bootstrap_grant_passwordless_sudo | bool) | ternary('true', 'false') }} \
           CONFIGURE_SSHD={{ (bootstrap_configure_sshd | bool) | ternary('true', 'false') }} \
           SSHD_CONFIG_SNIPPET_B64={{ bootstrap_sshd_config_snippet | b64encode | quote }} \
           bash -lc 'printf %s "$BOOTSTRAP_SCRIPT_B64" | base64 -d | bash'
