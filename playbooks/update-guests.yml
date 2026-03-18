@@ -1,17 +1,46 @@
 ---
-- name: Run updates on all guests except Semaphore host
-  hosts: 'guests:!lxc-109'
+- name: Run basic updates
+  hosts: 'guests'
   gather_facts: true
   any_errors_fatal: true
   become: true
   tasks:
-    - name: Include common guest update tasks
-      ansible.builtin.include_tasks: 'tasks/update-guests-common.yml'
+  - name: Update package lists and upgrade packages on Debian-based guests
+    ansible.builtin.debug:
+      msg: 'Starting apt dist-upgrade on {{ inventory_hostname }} (async with polling feedback)'
+    when: (ansible_facts['os_family'] == "Debian")
 
-- name: Run updates on Semaphore host
-  hosts: lxc-109
-  gather_facts: true
-  become: true
-  tasks:
-    - name: Include common guest update tasks
-      ansible.builtin.include_tasks: 'tasks/update-guests-common.yml'
+  - name: Update package lists and upgrade packages on Debian-based guests
+    ansible.builtin.apt:
+      update_cache: yes
+      upgrade: dist
+    async: 7200
+    poll: 10
+    register: apt_upgrade_result
+    when: (ansible_facts['os_family'] == "Debian")
+
+  - name: Report apt upgrade completion
+    ansible.builtin.debug:
+      msg: >-
+        Apt update/upgrade completed on {{ inventory_hostname }}
+    when: (ansible_facts['os_family'] == "Debian")
+
+  - name: Update package lists and upgrade packages on Arch-based guests
+    ansible.builtin.debug:
+      msg: 'Starting pacman system upgrade on {{ inventory_hostname }} (async with polling feedback)'
+    when: (ansible_facts['os_family'] == "Archlinux")
+
+  - name: Update package lists and upgrade packages on Arch-based guests
+    ansible.builtin.pacman:
+      update_cache: yes
+      upgrade: yes
+    async: 7200
+    poll: 10
+    register: pacman_upgrade_result
+    when: (ansible_facts['os_family'] == "Archlinux")
+
+  - name: Report pacman upgrade completion
+    ansible.builtin.debug:
+      msg: >-
+        Pacman update/upgrade completed on {{ inventory_hostname }}
+    when: (ansible_facts['os_family'] == "Archlinux")
