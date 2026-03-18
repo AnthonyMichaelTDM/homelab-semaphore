@@ -31,16 +31,9 @@
       loop: "{{ proxied_target_hosts | default([]) }}"
       register: proxy_ping_results
       changed_when: false
-      failed_when: false
       when:
         - proxied_target_hosts is defined
         - proxied_target_hosts | length > 0
-    
-    - name: Debug failed ping results
-      ansible.builtin.debug:
-        var: (proxy_ping_results.results | rejectattr('rc', 'equalto', 0) | list)
-      when:
-        - proxy_ping_results is defined
 
     - name: Fail if one or more proxied hosts are unreachable
       ansible.builtin.assert:
