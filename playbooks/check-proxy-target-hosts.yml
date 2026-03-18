@@ -2,6 +2,7 @@
 - name: Check route target reachability from reverse proxies
   hosts: reverse_proxies
   gather_facts: false
+  become: true # Required for ping command, needs CAP_NET_RAW capability
   tasks:
     - name: Build list of proxied target hosts
       ansible.builtin.set_fact:
@@ -9,16 +10,24 @@
           {{
             routes | default([])
             | map(attribute='target')
-            | map('regex_replace', ':\\d+$', '')
+            | map('regex_search', '^[^:]+')
             | unique
             | list
           }}
       when:
         - routes is defined
 
+    - name: Debug proxied target hosts
+      ansible.builtin.debug:
+        msg: >-
+          Proxied target hosts for {{ inventory_hostname }}: {{
+            proxied_target_hosts | default('No proxied hosts defined')
+          }}
+      when:
+        - proxied_target_hosts is defined
+
     - name: Ping each proxied target host from this reverse proxy
-      ansible.builtin.command:
-        cmd: ping -c 1 -W 1 {{ hostvars[item].ansible_host | default(item) }}
+      ansible.builtin.command: ping -c 1 -W 1 {{ hostvars[item].ansible_host }}
       loop: "{{ proxied_target_hosts | default([]) }}"
       register: proxy_ping_results
       changed_when: false
@@ -26,6 +35,12 @@
       when:
         - proxied_target_hosts is defined
         - proxied_target_hosts | length > 0
+    
+    - name: Debug failed ping results
+      ansible.builtin.debug:
+        var: (proxy_ping_results.results | rejectattr('rc', 'equalto', 0) | list)
+      when:
+        - proxy_ping_results is defined
 
     - name: Fail if one or more proxied hosts are unreachable
       ansible.builtin.assert:
