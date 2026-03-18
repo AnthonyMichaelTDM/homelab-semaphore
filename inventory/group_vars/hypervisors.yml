@@ -1,0 +1,3 @@
+# Hypervisor-specific variables
+---
+ansible_user: root

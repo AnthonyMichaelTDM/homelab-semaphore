@@ -1,0 +1,139 @@
+---
+- name: Bootstrap ansible access in Proxmox guests via hypervisor tools
+  hosts: r730xd-main
+  gather_facts: false
+  vars:
+    bootstrap_ansible_user: ansible
+    bootstrap_install_packages: true
+    bootstrap_grant_sudo: false
+    bootstrap_passwordless_sudo: false
+    bootstrap_lxc_hosts: "{{ groups['lxc'] | default([]) }}"
+    bootstrap_vm_hosts: "{{ groups['vm'] | default([]) }}"
+    bootstrap_guest_setup_script: |
+      set -euo pipefail
+      user="$BOOTSTRAP_USER"
+      key="$(printf %s "$BOOTSTRAP_KEY_B64" | base64 -d)"
+
+      if id -u "$user" >/dev/null 2>&1; then
+        echo "SKIP_EXISTING_USER: $user"
+        exit 3
+      fi
+
+      useradd -m -s /bin/bash "$user"
+
+      install -d -m 700 -o "$user" -g "$user" "/home/$user/.ssh"
+      touch "/home/$user/.ssh/authorized_keys"
+      chmod 600 "/home/$user/.ssh/authorized_keys"
+      chown "$user:$user" "/home/$user/.ssh/authorized_keys"
+
+      if ! grep -qxF "$key" "/home/$user/.ssh/authorized_keys"; then
+        printf "%s\n" "$key" >> "/home/$user/.ssh/authorized_keys"
+      fi
+
+      if [ "$INSTALL_PACKAGES" = "true" ]; then
+        if command -v apt-get >/dev/null 2>&1; then
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -y
+          if [ "$GRANT_SUDO" = "true" ]; then
+            apt-get install -y sudo python3
+          else
+            apt-get install -y python3
+          fi
+        elif command -v pacman >/dev/null 2>&1; then
+          if [ "$GRANT_SUDO" = "true" ]; then
+            pacman -Sy --noconfirm sudo python
+          else
+            pacman -Sy --noconfirm python
+          fi
+        fi
+      fi
+
+      if [ "$GRANT_SUDO" = "true" ]; then
+        if [ "$PASSWORDLESS_SUDO" = "true" ]; then
+          echo "$user ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/90-$user"
+        else
+          echo "$user ALL=(ALL) ALL" > "/etc/sudoers.d/90-$user"
+        fi
+        chmod 440 "/etc/sudoers.d/90-$user"
+      fi
+
+  vars_prompt:
+    - name: bootstrap_ansible_public_key
+      prompt: "Paste the SSH public key for the ansible user"
+      private: false
+
+  tasks:
+    - name: Require ansible public key
+      ansible.builtin.assert:
+        that:
+          - bootstrap_ansible_public_key | length > 0
+        fail_msg: >-
+          Set bootstrap_ansible_public_key, for example:
+          -e "bootstrap_ansible_public_key=$(cat ~/.ssh/ansible_ed25519.pub)"
+
+    - name: Verify Proxmox tooling exists
+      ansible.builtin.command: command -v {{ item }}
+      loop:
+        - pct
+        - qm
+      changed_when: false
+
+    - name: Bootstrap ansible user in LXC guests via pct exec
+      ansible.builtin.shell: |
+        set -euo pipefail
+        ct_id="{{ item | regex_replace('^lxc-(\\d+)$', '\\1') }}"
+
+        pct exec "$ct_id" -- /usr/bin/env \
+          BOOTSTRAP_USER={{ bootstrap_ansible_user | quote }} \
+          BOOTSTRAP_KEY_B64={{ bootstrap_ansible_public_key | b64encode | quote }} \
+          INSTALL_PACKAGES={{ (bootstrap_install_packages | bool) | ternary('true', 'false') }} \
+          GRANT_SUDO={{ (bootstrap_grant_sudo | bool) | ternary('true', 'false') }} \
+          PASSWORDLESS_SUDO={{ (bootstrap_passwordless_sudo | bool) | ternary('true', 'false') }} \
+          bash -lc {{ bootstrap_guest_setup_script | to_json }}
+      args:
+        executable: /bin/bash
+      loop: "{{ bootstrap_lxc_hosts }}"
+      register: lxc_bootstrap_results
+      changed_when: rc == 0
+      failed_when: rc not in [0, 3]
+
+    - name: Check qemu guest agent on VMs
+      ansible.builtin.command: qm guest ping {{ item | regex_replace('^vm-(\\d+)$', '\\1') }}
+      loop: "{{ bootstrap_vm_hosts }}"
+      register: vm_guest_agent_checks
+      changed_when: false
+      failed_when: false
+
+    - name: Report VM guest-agent availability
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.item }} guest-agent {{ 'available' if item.rc == 0 else 'NOT available (skipping qm bootstrap)' }}
+      loop: "{{ vm_guest_agent_checks.results }}"
+
+    - name: Bootstrap ansible user in VMs via qm guest exec
+      ansible.builtin.shell: |
+        set -euo pipefail
+        vm_id="{{ item.item | regex_replace('^vm-(\\d+)$', '\\1') }}"
+
+        qm guest exec "$vm_id" -- /usr/bin/env \
+          BOOTSTRAP_USER={{ bootstrap_ansible_user | quote }} \
+          BOOTSTRAP_KEY_B64={{ bootstrap_ansible_public_key | b64encode | quote }} \
+          INSTALL_PACKAGES={{ (bootstrap_install_packages | bool) | ternary('true', 'false') }} \
+          GRANT_SUDO={{ (bootstrap_grant_sudo | bool) | ternary('true', 'false') }} \
+          PASSWORDLESS_SUDO={{ (bootstrap_passwordless_sudo | bool) | ternary('true', 'false') }} \
+          bash -lc {{ bootstrap_guest_setup_script | to_json }}
+      args:
+        executable: /bin/bash
+      loop: "{{ vm_guest_agent_checks.results }}"
+      when: item.rc == 0
+      register: vm_bootstrap_results
+      changed_when: rc == 0
+      failed_when: rc not in [0, 3]
+
+    - name: Post-bootstrap reminder for VMs without guest agent
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.item }} skipped because qemu-guest-agent is unavailable.
+          Bootstrap this VM once over SSH, or install/enable qemu-guest-agent and re-run.
+      loop: "{{ vm_guest_agent_checks.results }}"
+      when: item.rc != 0
