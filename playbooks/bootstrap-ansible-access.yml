@@ -16,7 +16,7 @@
 
       if id -u "$user" >/dev/null 2>&1; then
         echo "SKIP_EXISTING_USER: $user"
-        exit 3
+        exit 0
       fi
 
       useradd -m -s /bin/bash "$user"
@@ -57,12 +57,19 @@
         chmod 440 "/etc/sudoers.d/90-$user"
       fi
 
+      echo "CREATED_USER: $user"
+
   vars_prompt:
     - name: bootstrap_ansible_public_key
       prompt: "Paste the SSH public key for the ansible user"
       private: false
 
   tasks:
+    - name: Normalize bootstrap host lists
+      ansible.builtin.set_fact:
+        bootstrap_lxc_hosts_list: "{{ (bootstrap_lxc_hosts | from_json) if (bootstrap_lxc_hosts is string) else bootstrap_lxc_hosts }}"
+        bootstrap_vm_hosts_list: "{{ (bootstrap_vm_hosts | from_json) if (bootstrap_vm_hosts is string) else bootstrap_vm_hosts }}"
+
     - name: Require ansible public key
       ansible.builtin.assert:
         that:
@@ -72,7 +79,9 @@
           -e "bootstrap_ansible_public_key=$(cat ~/.ssh/ansible_ed25519.pub)"
 
     - name: Verify Proxmox tooling exists
-      ansible.builtin.command: command -v {{ item }}
+      ansible.builtin.shell: command -v {{ item }} >/dev/null 2>&1
+      args:
+        executable: /bin/bash
       loop:
         - pct
         - qm
@@ -81,25 +90,25 @@
     - name: Bootstrap ansible user in LXC guests via pct exec
       ansible.builtin.shell: |
         set -euo pipefail
-        ct_id="{{ item | regex_replace('^lxc-(\\d+)$', '\\1') }}"
+        ct_id="{{ item | regex_search('[0-9]+$') }}"
 
         pct exec "$ct_id" -- /usr/bin/env \
           BOOTSTRAP_USER={{ bootstrap_ansible_user | quote }} \
           BOOTSTRAP_KEY_B64={{ bootstrap_ansible_public_key | b64encode | quote }} \
+          BOOTSTRAP_SCRIPT_B64={{ bootstrap_guest_setup_script | b64encode | quote }} \
           INSTALL_PACKAGES={{ (bootstrap_install_packages | bool) | ternary('true', 'false') }} \
           GRANT_SUDO={{ (bootstrap_grant_sudo | bool) | ternary('true', 'false') }} \
           PASSWORDLESS_SUDO={{ (bootstrap_passwordless_sudo | bool) | ternary('true', 'false') }} \
-          bash -lc {{ bootstrap_guest_setup_script | to_json }}
+          bash -lc 'printf %s "$BOOTSTRAP_SCRIPT_B64" | base64 -d | bash'
       args:
         executable: /bin/bash
-      loop: "{{ bootstrap_lxc_hosts }}"
+      loop: "{{ bootstrap_lxc_hosts_list }}"
       register: lxc_bootstrap_results
-      changed_when: rc == 0
-      failed_when: rc not in [0, 3]
+      changed_when: "'CREATED_USER:' in (stdout | default(''))"
 
     - name: Check qemu guest agent on VMs
-      ansible.builtin.command: qm guest ping {{ item | regex_replace('^vm-(\\d+)$', '\\1') }}
-      loop: "{{ bootstrap_vm_hosts }}"
+      ansible.builtin.command: qm guest cmd {{ item | regex_search('[0-9]+$') }} ping
+      loop: "{{ bootstrap_vm_hosts_list }}"
       register: vm_guest_agent_checks
       changed_when: false
       failed_when: false
@@ -113,22 +122,22 @@
     - name: Bootstrap ansible user in VMs via qm guest exec
       ansible.builtin.shell: |
         set -euo pipefail
-        vm_id="{{ item.item | regex_replace('^vm-(\\d+)$', '\\1') }}"
+        vm_id="{{ item.item | regex_search('[0-9]+$') }}"
 
         qm guest exec "$vm_id" -- /usr/bin/env \
           BOOTSTRAP_USER={{ bootstrap_ansible_user | quote }} \
           BOOTSTRAP_KEY_B64={{ bootstrap_ansible_public_key | b64encode | quote }} \
+          BOOTSTRAP_SCRIPT_B64={{ bootstrap_guest_setup_script | b64encode | quote }} \
           INSTALL_PACKAGES={{ (bootstrap_install_packages | bool) | ternary('true', 'false') }} \
           GRANT_SUDO={{ (bootstrap_grant_sudo | bool) | ternary('true', 'false') }} \
           PASSWORDLESS_SUDO={{ (bootstrap_passwordless_sudo | bool) | ternary('true', 'false') }} \
-          bash -lc {{ bootstrap_guest_setup_script | to_json }}
+          bash -lc 'printf %s "$BOOTSTRAP_SCRIPT_B64" | base64 -d | bash'
       args:
         executable: /bin/bash
       loop: "{{ vm_guest_agent_checks.results }}"
       when: item.rc == 0
       register: vm_bootstrap_results
-      changed_when: rc == 0
-      failed_when: rc not in [0, 3]
+      changed_when: "'CREATED_USER:' in (stdout | default(''))"
 
     - name: Post-bootstrap reminder for VMs without guest agent
       ansible.builtin.debug:
